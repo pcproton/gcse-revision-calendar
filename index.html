@@ -15,6 +15,15 @@ button:hover{border-color:var(--green)}button:focus-visible,input:focus-visible,
 .weekday,.cell,.month{background:white}.weekday{padding:8px;text-align:center;font-size:.8rem;font-weight:700;color:#456258}.cell{min-height:108px;padding:6px}.week .cell{min-height:220px}.outside{background:#edf2ed}.date{border:0;background:transparent;padding:4px 8px}.today{background:#d4ecdd;color:#144c38;font-weight:800}
 .session{width:100%;display:block;text-align:left;overflow-wrap:anywhere;margin-top:5px;background:#e7f3eb;border:1px solid transparent;padding:6px;font-size:.84rem}.session.done{background:#f1f2ef;color:#485a51}.session small{display:block;margin-top:2px}.day{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.day .session{font-size:1rem;padding:10px}.year{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}.month{text-align:left;padding:12px}.mini{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-top:8px;text-align:center;font-size:.72rem}.mini span{padding:2px}.marked{background:#d4ecdd;border-radius:4px;font-weight:700}.muted{color:#52665d;font-size:.86rem}
 dialog{border:1px solid var(--line);border-radius:14px;width:min(440px,calc(100% - 24px));color:inherit;padding:20px}dialog::backdrop{background:#17332d75}form{display:grid;gap:10px}label{display:grid;gap:4px;font-size:.92rem}input,textarea{min-width:0;padding:8px;border:1px solid #adbbb3;border-radius:6px}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.check{display:flex;align-items:center}.danger{color:#a12929}#storage{color:#a12929;margin-top:12px}
+.time-board{min-width:320px;--slot:34px;--hour-width:58px;background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.time-board.week-board{min-width:920px}.time-head,.time-body{display:grid;grid-template-columns:var(--hour-width) repeat(var(--days),minmax(0,1fr))}
+.time-head{background:#e7f3eb;text-align:center;font-size:.84rem;font-weight:700}.time-head span{padding:9px 4px}
+.hour-labels span{display:block;height:calc(2 * var(--slot));padding:3px 5px;font-size:.75rem;text-align:center;color:#456258}
+.time-column{position:relative;border-left:1px solid var(--line);user-select:none}
+.time-slot{display:block;width:100%;height:var(--slot);border:0;border-top:1px dashed #e4ebe5;border-radius:0;padding:0;touch-action:pan-y}
+.time-slot:nth-child(odd){border-top:1px solid var(--line)}.time-slot:hover,.time-slot.selected{background:#d4ecdd}.time-slot:focus-visible{outline-offset:-3px}
+.timed-session{position:absolute;z-index:1;margin:0;overflow:auto;line-height:1.15;box-shadow:inset 3px 0 #3b795f}.timed-session small{margin-top:1px}
+.untimed{padding:10px 12px;border-top:1px solid var(--line)}#time-hint{margin-bottom:8px}
 </style>
 <main>
 <header><div><h1>GCSE Revision Calendar</h1><p id="progress"></p></div><button id="add" class="primary">+ Add session</button></header>
@@ -22,6 +31,7 @@ dialog{border:1px solid var(--line);border-radius:14px;width:min(440px,calc(100%
 <div class="actions"><button id="prev" aria-label="Previous period">‹</button><button id="next" aria-label="Next period">›</button><button id="today">Today</button><h2 id="period"></h2></div>
 <div class="switcher" aria-label="Calendar view"><button data-view="year">Year</button><button data-view="month">Month</button><button data-view="week">Week</button><button data-view="day">Day</button></div>
 </div>
+<p id="time-hint" class="muted" hidden>Drag up or down within a day to select a time range. Click or tap an empty slot for 30 minutes.</p>
 <div class="scroll"><div id="calendar"></div></div>
 <p id="storage" role="status"></p>
 </main>
@@ -71,13 +81,14 @@ function button(className, content, action) {
   node.onclick = action;
   return node;
 }
-function openEditor(date, session) {
+function openEditor(date, session, range) {
   editing = session?.id ?? null;
   form.reset();
   const fields = form.elements;
   fields.date.value = session?.date ?? dateKey(date);
   for (const name of ['subject','topic','time','notes']) fields[name].value = session?.[name] ?? '';
-  fields.duration.value = session?.duration ?? 30;
+  if (range) fields.time.value = clock(range.start);
+  fields.duration.value = session?.duration ?? range?.duration ?? 30;
   fields.done.checked = session?.done ?? false;
   byId('editor-title').textContent = session ? 'Edit session' : 'Add revision session';
   byId('remove').hidden = !session;
@@ -95,6 +106,105 @@ function sessionCard(session) {
   card.append(element('small', '', [session.time, session.duration + ' min'].filter(Boolean).join(' · ')));
   return card;
 }
+const slotMinutes = 30;
+const dayMinutes = 1440;
+const slotCount = dayMinutes / slotMinutes;
+const clock = minutes => [Math.floor(minutes / 60), minutes % 60]
+  .map(part => String(part).padStart(2, '0')).join(':');
+const minutesAt = time => {
+  const [hours, minutes] = time.split(':').map(Number);
+  return hours * 60 + minutes;
+};
+function timeColumn(date) {
+  const column = element('div', 'time-column');
+  const slots = [];
+  let drag = null;
+  const openRange = (first, last) => openEditor(date, null, {
+    start: Math.min(first, last) * slotMinutes,
+    duration: (Math.abs(first - last) + 1) * slotMinutes
+  });
+  const slotAt = clientY => {
+    const bounds = column.getBoundingClientRect();
+    return Math.max(0, Math.min(slotCount - 1, Math.floor((clientY - bounds.top) / (bounds.height / slotCount))));
+  };
+  const highlight = last => {
+    const low = Math.min(drag.first, last), high = Math.max(drag.first, last);
+    slots.forEach((slot, index) => slot.classList.toggle('selected', index >= low && index <= high));
+  };
+  const clear = () => {
+    drag = null;
+    slots.forEach(slot => slot.classList.remove('selected'));
+  };
+  for (let index = 0; index < slotCount; index++) {
+    const slot = button('time-slot', '', event => {
+      if (event.detail === 0 || event.pointerType === 'touch') openRange(index, index);
+    });
+    slot.setAttribute('aria-label', 'Add session on ' + format(date, {weekday:'long', day:'numeric', month:'long'}) + ' at ' + clock(index * slotMinutes));
+    slot.onpointerdown = event => {
+      if (event.button !== 0 || event.pointerType === 'touch') return;
+      event.preventDefault();
+      drag = {first:index, pointer:event.pointerId};
+      column.setPointerCapture(event.pointerId);
+      highlight(index);
+    };
+    slots.push(slot);
+    column.append(slot);
+  }
+  column.onpointermove = event => {
+    if (drag?.pointer === event.pointerId) highlight(slotAt(event.clientY));
+  };
+  column.onpointerup = event => {
+    if (drag?.pointer !== event.pointerId) return;
+    const {first} = drag;
+    clear();
+    openRange(first, slotAt(event.clientY));
+  };
+  column.onpointercancel = clear;
+  column.onlostpointercapture = clear;
+  const timed = sessionsOn(date).filter(session => session.time);
+  const lanes = [];
+  for (const session of timed) {
+    const start = minutesAt(session.time);
+    const end = Math.min(dayMinutes, start + Number(session.duration));
+    const visibleEnd = Math.min(dayMinutes, Math.max(end, start + slotMinutes));
+    let lane = lanes.findIndex(laneEnd => laneEnd <= start);
+    if (lane === -1) lane = lanes.length;
+    lanes[lane] = visibleEnd;
+    const card = sessionCard(session);
+    card.classList.add('timed-session');
+    card.style.top = start / dayMinutes * 100 + '%';
+    card.style.height = (visibleEnd - start) / dayMinutes * 100 + '%';
+    column.append(card);
+    card.dataset.lane = lane;
+  }
+  for (const card of column.querySelectorAll('.timed-session')) {
+    card.style.left = Number(card.dataset.lane) / lanes.length * 100 + '%';
+    card.style.width = 100 / lanes.length + '%';
+  }
+  return column;
+}
+function renderTimetable(dates, now) {
+  calendar.className = 'time-board' + (dates.length > 1 ? ' week-board' : '');
+  calendar.style.setProperty('--days', dates.length);
+  const head = element('div', 'time-head');
+  head.append(element('span', '', 'Time'));
+  const body = element('div', 'time-body');
+  const labels = element('div', 'hour-labels');
+  for (let hour = 0; hour < 24; hour++) labels.append(element('span', '', clock(hour * 60)));
+  body.append(labels);
+  const unscheduled = element('div', 'untimed');
+  for (const date of dates) {
+    head.append(element('span', dateKey(date) === now ? 'today' : '', format(date, {weekday:'short',day:'numeric',month:'short'})));
+    body.append(timeColumn(date));
+    const items = sessionsOn(date).filter(session => !session.time);
+    if (items.length) {
+      unscheduled.append(element('p', 'muted', format(date, {weekday:'short',day:'numeric',month:'short'}) + ' · No start time'));
+      unscheduled.append(...items.map(sessionCard));
+    }
+  }
+  calendar.append(head, body);
+  if (unscheduled.childElementCount) calendar.append(unscheduled);
+}
 function render() {
   const year = selected.getFullYear(), month = selected.getMonth();
   const week = monday(selected);
@@ -109,11 +219,9 @@ function render() {
   document.querySelectorAll('[data-view]').forEach(tab => tab.setAttribute('aria-pressed', String(tab.dataset.view === view)));
   byId('progress').textContent = sessions.filter(session => session.done).length + ' of ' + sessions.length + ' sessions completed';
   calendar.replaceChildren();
-  if (view === 'day') {
-    calendar.className = 'day';
-    const items = sessionsOn(selected);
-    if (!items.length) calendar.append(element('p', 'muted', 'No revision sessions planned for this day.'));
-    calendar.append(...items.map(sessionCard));
+  byId('time-hint').hidden = view !== 'day' && view !== 'week';
+  if (view === 'day' || view === 'week') {
+    renderTimetable(view === 'day' ? [selected] : weekdays.map((_, index) => offset(week, index)), now);
     return;
   }
   if (view === 'year') {
@@ -138,8 +246,8 @@ function render() {
   }
   calendar.className = 'grid ' + view;
   weekdays.forEach(day => calendar.append(element('div','weekday',day)));
-  const start = view === 'week' ? week : monday(new Date(year, month, 1));
-  const end = view === 'week' ? 7 : Math.ceil(((new Date(year, month, 1).getDay() + 6) % 7 + new Date(year, month + 1, 0).getDate()) / 7) * 7;
+  const start = monday(new Date(year, month, 1));
+  const end = Math.ceil(((new Date(year, month, 1).getDay() + 6) % 7 + new Date(year, month + 1, 0).getDate()) / 7) * 7;
   for (let i = 0; i < end; i++) {
     const date = offset(start, i);
     const cell = element('div', 'cell' + (view === 'month' && date.getMonth() !== month ? ' outside' : ''));
