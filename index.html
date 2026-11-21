@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en-GB">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GCSE Revision Calendar</title>
+<style>
+:root{font:16px system-ui,sans-serif;color:#172d2a;background:#f4f6f2;--green:#155844;--line:#dae4dc}
+*{box-sizing:border-box}body{margin:0}main{max-width:1200px;margin:auto;padding:32px 18px}
+header,.toolbar,.actions,.switcher{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+header,.toolbar{justify-content:space-between}header{margin-bottom:26px}h1,h2,h3,p{margin:0}h1{font-size:clamp(1.7rem,4vw,2.5rem)}h2{font-size:1.25rem}
+#progress{color:#456258;margin-top:6px}button,input,textarea{font:inherit}button{cursor:pointer;background:#fff;color:inherit;border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+button:hover{border-color:var(--green)}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #6a9c89;outline-offset:2px}
+.primary,button[aria-pressed=true]{background:var(--green);color:white;border-color:var(--green)}
+.toolbar{margin-bottom:12px}.scroll{overflow:auto}.grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden;min-width:600px}
+.weekday,.cell,.month{background:white}.weekday{padding:8px;text-align:center;font-size:.8rem;font-weight:700;color:#456258}.cell{min-height:108px;padding:6px}.week .cell{min-height:220px}.outside{background:#edf2ed}.date{border:0;background:transparent;padding:4px 8px}.today{background:#d4ecdd;color:#144c38;font-weight:800}
+.session{width:100%;display:block;text-align:left;overflow-wrap:anywhere;margin-top:5px;background:#e7f3eb;border:1px solid transparent;padding:6px;font-size:.84rem}.session.done{background:#f1f2ef;color:#485a51}.session small{display:block;margin-top:2px}.day{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.day .session{font-size:1rem;padding:10px}.year{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}.month{text-align:left;padding:12px}.mini{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-top:8px;text-align:center;font-size:.72rem}.mini span{padding:2px}.marked{background:#d4ecdd;border-radius:4px;font-weight:700}.muted{color:#52665d;font-size:.86rem}
+dialog{border:1px solid var(--line);border-radius:14px;width:min(440px,calc(100% - 24px));color:inherit;padding:20px}dialog::backdrop{background:#17332d75}form{display:grid;gap:10px}label{display:grid;gap:4px;font-size:.92rem}input,textarea{min-width:0;padding:8px;border:1px solid #adbbb3;border-radius:6px}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.check{display:flex;align-items:center}.danger{color:#a12929}#storage{color:#a12929;margin-top:12px}
+</style>
+<main>
+<header><div><h1>GCSE Revision Calendar</h1><p id="progress"></p></div><button id="add" class="primary">+ Add session</button></header>
+<div class="toolbar">
+<div class="actions"><button id="prev" aria-label="Previous period">‹</button><button id="next" aria-label="Next period">›</button><button id="today">Today</button><h2 id="period"></h2></div>
+<div class="switcher" aria-label="Calendar view"><button data-view="year">Year</button><button data-view="month">Month</button><button data-view="week">Week</button><button data-view="day">Day</button></div>
+</div>
+<div class="scroll"><div id="calendar"></div></div>
+<p id="storage" role="status"></p>
+</main>
+<dialog id="editor"><form id="form">
+<h2 id="editor-title">Revision session</h2>
+<label>Subject<input name="subject" required maxlength="60" placeholder="e.g. Maths"></label>
+<label>Topic or task<input name="topic" required maxlength="120" placeholder="e.g. Complete a set of circle theorem questions"></label>
+<label>Date<input name="date" type="date" required min="1900-01-01" max="9999-12-31"></label>
+<div class="row"><label>Start time<input name="time" type="time"></label><label>Minutes<input name="duration" type="number" min="1" max="1440" required value="30"></label></div>
+<label>Notes<textarea name="notes" rows="2" maxlength="500"></textarea></label>
+<label class="check"><input name="done" type="checkbox"> Completed</label>
+<div class="actions"><button class="primary" type="submit">Save session</button><button type="button" id="cancel">Cancel</button><button type="button" id="remove" class="danger">Delete</button></div>
+</form></dialog>
+<script>
+const byId = id => document.getElementById(id);
+const calendar = byId('calendar'), form = byId('form'), editor = byId('editor');
+const storageKey = 'gcse-revision-calendar-v1';
+const format = (date, options) => date.toLocaleDateString('en-GB', options);
+const dateKey = date => [date.getFullYear(), date.getMonth() + 1, date.getDate()].map(part => String(part).padStart(2, '0')).join('-');
+const offset = (date, days) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+const monday = date => offset(date, -((date.getDay() + 6) % 7));
+const weekdays = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+let selected = new Date(), view = 'month', editing = null, sessions = [];
+try {
+  const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+  if (Array.isArray(saved)) sessions = saved;
+} catch {
+  byId('storage').textContent = 'Saved sessions could not be loaded.';
+}
+function persist() {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(sessions));
+    byId('storage').textContent = '';
+  } catch {
+    byId('storage').textContent = 'Your browser could not save this change. It is available until you close or reload the page.';
+  }
+}
+function element(tag, className, content) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (content !== undefined) node.textContent = content;
+  return node;
+}
+function button(className, content, action) {
+  const node = element('button', className, content);
+  node.type = 'button';
+  node.onclick = action;
+  return node;
+}
+function openEditor(date, session) {
+  editing = session?.id ?? null;
+  form.reset();
+  const fields = form.elements;
+  fields.date.value = session?.date ?? dateKey(date);
+  for (const name of ['subject','topic','time','notes']) fields[name].value = session?.[name] ?? '';
+  fields.duration.value = session?.duration ?? 30;
+  fields.done.checked = session?.done ?? false;
+  byId('editor-title').textContent = session ? 'Edit session' : 'Add revision session';
+  byId('remove').hidden = !session;
+  editor.showModal();
+  fields.subject.focus();
+}
+function sessionsOn(date) {
+  return sessions.filter(session => session.date === dateKey(date))
+    .sort((a, b) => (a.time || '24:00').localeCompare(b.time || '24:00'));
+}
+function sessionCard(session) {
+  const card = button('session' + (session.done ? ' done' : ''),
+    (session.done ? '✓ ' : '') + session.subject + ' · ' + session.topic,
+    () => openEditor(selected, session));
+  card.append(element('small', '', [session.time, session.duration + ' min'].filter(Boolean).join(' · ')));
+  return card;
+}
+function render() {
+  const year = selected.getFullYear(), month = selected.getMonth();
+  const week = monday(selected);
+  const now = dateKey(new Date());
+  const period = {
+    year: String(year),
+    month: format(selected, {month:'long', year:'numeric'}),
+    week: format(week, {day:'numeric',month:'short'}) + ' – ' + format(offset(week, 6), {day:'numeric',month:'short',year:'numeric'}),
+    day: format(selected, {weekday:'long',day:'numeric',month:'long',year:'numeric'})
+  };
+  byId('period').textContent = period[view];
+  document.querySelectorAll('[data-view]').forEach(tab => tab.setAttribute('aria-pressed', String(tab.dataset.view === view)));
+  byId('progress').textContent = sessions.filter(session => session.done).length + ' of ' + sessions.length + ' sessions completed';
+  calendar.replaceChildren();
+  if (view === 'day') {
+    calendar.className = 'day';
+    const items = sessionsOn(selected);
+    if (!items.length) calendar.append(element('p', 'muted', 'No revision sessions planned for this day.'));
+    calendar.append(...items.map(sessionCard));
+    return;
+  }
+  if (view === 'year') {
+    calendar.className = 'year';
+    const activeDays = new Set(sessions.map(session => session.date));
+    for (let index = 0; index < 12; index++) {
+      const first = new Date(year, index, 1);
+      const tile = button('month', undefined, () => { selected = first; view = 'month'; render(); });
+      tile.append(element('strong', '', format(first, {month:'long'})));
+      const mini = element('div', 'mini');
+      weekdays.forEach(day => mini.append(element('span', 'muted', day[0])));
+      const start = monday(first);
+      for (let i = 0; i < 42; i++) {
+        const date = offset(start, i);
+        mini.append(element('span', activeDays.has(dateKey(date)) && date.getMonth() === index ? 'marked' : '',
+          date.getMonth() === index ? date.getDate() : ''));
+      }
+      tile.append(mini);
+      calendar.append(tile);
+    }
+    return;
+  }
+  calendar.className = 'grid ' + view;
+  weekdays.forEach(day => calendar.append(element('div','weekday',day)));
+  const start = view === 'week' ? week : monday(new Date(year, month, 1));
+  const end = view === 'week' ? 7 : Math.ceil(((new Date(year, month, 1).getDay() + 6) % 7 + new Date(year, month + 1, 0).getDate()) / 7) * 7;
+  for (let i = 0; i < end; i++) {
+    const date = offset(start, i);
+    const cell = element('div', 'cell' + (view === 'month' && date.getMonth() !== month ? ' outside' : ''));
+    const dayButton = button('date' + (dateKey(date) === now ? ' today' : ''), date.getDate(), () => {
+      selected = date;
+      view = 'day';
+      render();
+    });
+    dayButton.setAttribute('aria-label', format(date, {dateStyle:'full'}));
+    cell.append(dayButton, ...sessionsOn(date).map(sessionCard));
+    calendar.append(cell);
+  }
+}
+function move(direction) {
+  if (view === 'year') selected = new Date(selected.getFullYear() + direction, selected.getMonth(), 1);
+  if (view === 'month') selected = new Date(selected.getFullYear(), selected.getMonth() + direction, 1);
+  if (view === 'week' || view === 'day') selected = offset(selected, direction * (view === 'week' ? 7 : 1));
+  render();
+}
+byId('prev').onclick = () => move(-1);
+byId('next').onclick = () => move(1);
+byId('today').onclick = () => { selected = new Date(); render(); };
+byId('add').onclick = () => openEditor(selected);
+byId('cancel').onclick = () => editor.close();
+document.querySelectorAll('[data-view]').forEach(tab => {
+  tab.onclick = () => { view = tab.dataset.view; render(); };
+});
+form.onsubmit = event => {
+  event.preventDefault();
+  const data = new FormData(form);
+  const subject = data.get('subject').trim(), topic = data.get('topic').trim();
+  if (!subject || !topic) {
+    const field = form.elements[subject ? 'topic' : 'subject'];
+    field.value = '';
+    field.reportValidity();
+    return;
+  }
+  const session = {...Object.fromEntries(data), subject, topic, id: editing ?? crypto.randomUUID(), done: data.has('done')};
+  sessions = editing ? sessions.map(item => item.id === editing ? session : item) : [...sessions, session];
+  const [year, month, day] = session.date.split('-').map(Number);
+  selected = new Date(year, month - 1, day);
+  persist();
+  editor.close();
+  render();
+};
+byId('remove').onclick = () => {
+  if (!confirm('Delete this revision session?')) return;
+  sessions = sessions.filter(session => session.id !== editing);
+  persist();
+  editor.close();
+  render();
+};
+render();
+</script>
+</html>
